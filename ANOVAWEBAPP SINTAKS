@@ -1,0 +1,254 @@
+# Load the required libraries
+library(shinydashboard)
+library(shiny)
+library(DT)
+library(car)
+library(multcomp)
+library(tidyr)
+library(ggplot2)  # Added for boxplot visualization
+
+# Set the default dataset
+defaultAovData <- data.frame(
+  Day = 1:10,
+  Left_Sidebar = c(2.5, 2.7, 2.8, 2.6, 3.0, 2.4, 2.9, 2.5, 2.6, 2.7),
+  Center_Page = c(4.8, 4.5, 4.0, 4.7, 3.9, 3.6, 4.1, 3.4, 4.8, 3.9),
+  Right_Sidebar = c(3.1, 2.9, 3.0, 3.2, 3.3, 2.8, 3.4, 3.1, 3.2, 3.5)
+)
+
+# Define the UI
+ui <- dashboardPage(
+  dashboardHeader(
+    title = "ANOVA App"),
+  dashboardSidebar(
+    
+    fileInput("file", "Upload CSV file"),
+    actionButton("loadData", "Load Data"),
+    
+    # ANOVA options
+    selectInput("factorVar", "Select Factor Variable", ""),
+    selectInput("responseVar", "Select Response Variable", ""),
+    actionButton("runANOVA", "ANOVA Output")
+  ),
+  dashboardBody(
+    fluidRow(
+      box(
+        width = 12,
+        title = "Data Table",
+        solidHeader = TRUE,
+        status = "danger",
+        DTOutput("dataTable"),
+        style = "background-color: white; color: #ffffff;"
+      )
+    ),
+    fluidRow(
+      box(
+        width = 12,
+        title = "ANOVA Summary",
+        solidHeader = TRUE,
+        status = "primary",
+        verbatimTextOutput("anovaSummary"),
+        # Menambahkan warna pada judul box
+        style = "background-color: #007bff; color: #ffffff;"
+      )
+    ),
+    fluidRow(
+      box(
+        width = 6,
+        height = "auto",
+        title = "Tukey's HSD Test",
+        solidHeader = TRUE,
+        status = "info",
+        verbatimTextOutput("tukeySummary"),
+        # Menambahkan warna pada judul box
+        style = "background-color: #17a2b8; color: black;"
+      ),
+      box(
+        width = 6,
+        height = "auto",
+        title = "Boxplot Visualization",
+        solidHeader = TRUE,
+        status = "success",
+        plotOutput("boxplot"),
+        # Menambahkan warna pada judul box
+        style = "background-color: #28a745; color: #ffffff;"
+      )
+    ),
+    fluidRow(
+      box(
+        width = 6,
+        height = "auto",
+        title = "Homoscedasticity Plot",
+        solidHeader = TRUE,
+        status = "info",
+        plotOutput("homoscedasticityPlot"),
+        # Menambahkan warna pada judul box
+        style = "background-color: #17a2b8; color: #ffffff;"
+      ),
+      box(
+        width = 6,
+        height = "auto",
+        title = "Normality Plot",
+        solidHeader = TRUE,
+        status = "warning",
+        plotOutput("normalityPlot"),
+        # Menambahkan warna pada judul box
+        style = "background-color: #ffc107; color: #000000;"
+      )
+    )
+  )
+  
+  
+  
+)
+
+server <- function(input, output, session) {
+  data <- reactiveVal(NULL)
+  anovaModel <- reactiveVal(NULL)
+  factorLevels <- reactiveVal(NULL)
+  tukeyResult <- reactiveVal(NULL)
+  
+  
+  data(defaultAovData)
+  updateSelectInput(session, "responseVar", choices = colnames(defaultAovData))
+  updateSelectInput(session, "factorVar", choices = colnames(defaultAovData))
+  
+  defaultAovData <- as.data.frame(pivot_longer(defaultAovData, cols = 2:4, names_to = "AdPlacement",
+                                               values_to = "CTR", names_repair = "unique"))
+  names(defaultAovData) <- c("Day", "AdPlacement", "CTR")
+  data(defaultAovData)
+  
+  updateSelectInput(session, "responseVar", choices = colnames(defaultAovData))
+  updateSelectInput(session, "factorVar", choices = colnames(defaultAovData))
+  
+  observeEvent(input$file, {
+    req(input$file)
+    data(read.csv(input$file$datapath, sep = ";"))
+    updateSelectInput(session, "responseVar", choices = colnames(data()))
+    updateSelectInput(session, "factorVar", choices = colnames(data()))
+  })
+  
+  observeEvent(input$loadData, {
+    req(input$pasteData)
+    data(read.table(text = input$pasteData, header = TRUE, sep = "\t", stringsAsFactors = FALSE))
+    updateSelectInput(session, "responseVar", choices = colnames(data()))
+    updateSelectInput(session, "factorVar", choices = colnames(data()))
+  })
+  
+  observeEvent(input$runANOVA, {
+    req(data(), input$factorVar, input$responseVar)
+    
+    # Check if the selected variables are valid
+    if (!all(c(input$factorVar, input$responseVar) %in% colnames(data()))) {
+      cat("Error: Selected variables are not valid.")
+      return(NULL)
+    }
+    
+    # Check for missing or infinite values in the selected variables
+    if (any(is.na(data()[[input$factorVar]])) || any(is.infinite(data()[[input$factorVar]])) ||
+        any(is.na(data()[[input$responseVar]])) || any(is.infinite(data()[[input$responseVar]]))) {
+      cat("Error: Missing or infinite values detected in the selected variables.")
+      return(NULL)
+    }
+    
+    # Check if there is enough variation in the response variable
+    if (length(unique(data()[[input$responseVar]])) <= 1) {
+      cat("Error: Insufficient variation in the response variable for ANOVA.")
+      return(NULL)
+    }
+    
+    # Perform ANOVA
+    formula <- as.formula(paste(input$responseVar, "~", input$factorVar))
+    anovaResult <- tryCatch(
+      aov(formula, data = data()),
+      error = function(e) {
+        cat("Error: Unable to run ANOVA. Check the data and try again.")
+        return(NULL)
+      }
+    )
+    
+    # Check if ANOVA was successful
+    if (is.null(anovaResult)) {
+      return(NULL)
+    }
+    
+    # Save the ANOVA model and factor levels for Tukey's HSD
+    anovaModel(anovaResult)
+    factorLevels(levels(data()[[input$factorVar]]))
+    
+    # Display ANOVA summary
+    output$anovaSummary <- renderPrint({
+      summary(anovaResult)
+    })
+    
+    # Assumptions tests
+    assumptionsText <- character()
+    
+    # Check residuals for normality
+    # Residuals for normality plot
+    output$normalityPlot <- renderPlot({
+      qqnorm(resid(anovaResult), main = "Normal Q-Q Plot of Residuals")
+      qqline(resid(anovaResult), col = 2)
+    })
+    
+    # Residuals for homoscedasticity plot
+    output$homoscedasticityPlot <- renderPlot({
+      plot(fitted(anovaResult), resid(anovaResult), main = "Residuals vs Fitted Values",
+           xlab = "Fitted Values", ylab = "Residuals")
+      abline(h = 0, col = "red")
+    })
+    
+    # Display assumptions summary
+    output$assumptionsSummary <- renderPrint({
+      cat(assumptionsText, sep = "\n")
+    })
+    
+    # Conduct Tukey's HSD test
+    tryCatch(
+      {
+        tukeyResult(TukeyHSD(anovaResult))
+        
+        # Display Tukey's HSD summary
+        output$tukeySummary <- renderPrint({
+          cat("Tukey's HSD Test:\n")
+          print(tukeyResult())
+        })
+      },
+      error = function(e) {
+        cat("Error: Unable to run Tukey's HSD. Check the ANOVA model and try again.\n")
+      }
+    )
+  })
+  
+  # Boxplot
+  output$boxplot <- renderPlot({
+    req(data(), input$factorVar, input$responseVar)
+    
+    # Check if the selected variables are valid
+    if (!all(c(input$factorVar, input$responseVar) %in% colnames(data()))) {
+      cat("Error: Selected variables are not valid.")
+      return(NULL)
+    }
+    
+    # Create boxplot
+    if (is.factor(data()[[input$factorVar]])) {
+      # For a categorical factor, create multiple boxplots (facet_wrap)
+      ggplot(data(), aes(x = data()[[input$factorVar]], y = data()[[input$responseVar]])) +
+        geom_boxplot() +
+        labs(title = "Boxplot", x = input$factorVar, y = input$responseVar) +
+        facet_wrap(~data()[[input$factorVar]])
+    } else {
+      # For a non-categorical factor, create a single boxplot
+      ggplot(data(), aes(x = 1, y = data()[[input$responseVar]])) +
+        geom_boxplot() +
+        labs(title = "Boxplot", x = input$factorVar, y = input$responseVar)
+    }
+  })
+  
+  output$dataTable <- renderDT({
+    req(data())
+    datatable(data())
+  })
+}
+
+# Run the app
+shinyApp(ui, server)
